@@ -1,12 +1,12 @@
 mod math;
 #[cfg(feature = "simdnoise")]
-mod simdnoise_backend;
+mod simdnoise;
 mod structs;
 
 mod noise;
 
 #[cfg(feature = "simdnoise")]
-pub use simdnoise_backend::SimdNoiseBackend;
+pub use simdnoise::SimdNoiseBackend;
 
 pub mod prelude {
     #[cfg(feature = "simdnoise")]

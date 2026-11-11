@@ -1,6 +1,6 @@
 /// Parameters shared by noise implementations.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct NoiseData {
+pub struct NoiseSettings {
     pub frequency: f32,
     pub octaves: u8,
     pub gain: f32,
@@ -9,7 +9,7 @@ pub struct NoiseData {
     pub mult: f32,
 }
 
-impl NoiseData {
+impl NoiseSettings {
     pub const fn new(frequency: f32, octaves: u8, gain: f32, lacunarity: f32, mult: f32) -> Self {
         Self {
             frequency,
@@ -53,23 +53,23 @@ noise_kinds!(
 /// A backend that can sample two-dimensional noise families.
 /// Implement this for a local adapter type to isolate the external noise crate.
 pub trait Noise2d<K: NoiseKind2d> {
-    fn sample_2d(&self, x: f32, y: f32, seed: i32, settings: &NoiseData) -> f32;
+    fn sample_2d(&self, x: f32, y: f32, seed: i32, settings: &NoiseSettings) -> f32;
 }
 
 /// A backend that can sample three-dimensional noise families.
 pub trait Noise3d<K: NoiseKind3d> {
-    fn sample_3d(&self, x: f32, y: f32, z: f32, seed: i32, settings: &NoiseData) -> f32;
+    fn sample_3d(&self, x: f32, y: f32, z: f32, seed: i32, settings: &NoiseSettings) -> f32;
 }
 
 /// Typed noise sampler. Dimension-specific methods are available only when
 /// `T` implements the corresponding sampling trait.
-pub struct GenericNoiseBuilder<T> {
+pub struct NoiseSampler<T> {
     backend: T,
-    settings: NoiseData,
+    settings: NoiseSettings,
 }
 
-impl<T> GenericNoiseBuilder<T> {
-    pub const fn new(backend: T, settings: NoiseData) -> Self {
+impl<T> NoiseSampler<T> {
+    pub const fn new(backend: T, settings: NoiseSettings) -> Self {
         Self { backend, settings }
     }
 
@@ -77,12 +77,12 @@ impl<T> GenericNoiseBuilder<T> {
         &self.backend
     }
 
-    pub const fn settings(&self) -> &NoiseData {
+    pub const fn settings(&self) -> &NoiseSettings {
         &self.settings
     }
 }
 
-impl<T> GenericNoiseBuilder<T> {
+impl<T> NoiseSampler<T> {
     #[inline]
     pub fn sample_2d<K: NoiseKind2d>(&self, x: f32, y: f32, seed: i32) -> f32
     where
@@ -108,21 +108,21 @@ mod noise_tests {
     struct ConstantNoise;
 
     impl Noise2d<Fbm2D> for ConstantNoise {
-        fn sample_2d(&self, x: f32, y: f32, seed: i32, settings: &NoiseData) -> f32 {
+        fn sample_2d(&self, x: f32, y: f32, seed: i32, settings: &NoiseSettings) -> f32 {
             x + y + seed as f32 + settings.frequency
         }
     }
 
     impl Noise3d<Fbm3D> for ConstantNoise {
-        fn sample_3d(&self, x: f32, y: f32, z: f32, seed: i32, settings: &NoiseData) -> f32 {
+        fn sample_3d(&self, x: f32, y: f32, z: f32, seed: i32, settings: &NoiseSettings) -> f32 {
             x + y + z + seed as f32 + settings.frequency
         }
     }
 
     #[test]
     fn sample_with_multi() {
-        let settings = NoiseData::new(2.0, 4, 0.5, 2.0, 3.0);
-        let builder = GenericNoiseBuilder::new(ConstantNoise, settings);
+        let settings = NoiseSettings::new(2.0, 4, 0.5, 2.0, 3.0);
+        let builder = NoiseSampler::new(ConstantNoise, settings);
 
         assert_eq!(builder.sample_2d::<Fbm2D>(1.0, 2.0, 5), 30.0);
         assert_eq!(builder.sample_3d::<Fbm3D>(1.0, 2.0, 3.0, 5), 39.0);
