@@ -6,7 +6,7 @@ mod structs;
 mod noise;
 
 #[cfg(feature = "simdnoise")]
-pub use simdnoise::SimdNoiseBackend;
+pub(crate) use simdnoise::SimdNoiseBackend;
 
 pub mod prelude {
     #[cfg(feature = "simdnoise")]
