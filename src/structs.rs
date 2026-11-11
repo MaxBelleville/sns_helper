@@ -2,6 +2,9 @@ use bytemuck::NoUninit;
 use std::marker::PhantomData;
 use std::mem::size_of;
 
+#[cfg(feature = "bevy")]
+pub use bevy_math::prelude::*;
+
 #[cfg(not(feature = "bevy"))]
 pub struct IVec3 {
     pub x: i32,
