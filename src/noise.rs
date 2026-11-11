@@ -1,3 +1,5 @@
+use super::structs::{Vec2, Vec3};
+
 /// Parameters shared by noise implementations.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NoiseSettings {
@@ -92,11 +94,29 @@ impl<T> NoiseSampler<T> {
     }
 
     #[inline]
+    pub fn sample_vec2<K: NoiseKind2d>(&self, vec: Vec2, seed: i32) -> f32
+    where
+        T: Noise2d<K>,
+    {
+        <T as Noise2d<K>>::sample_2d(&self.backend, vec.x, vec.y, seed, &self.settings)
+            * self.settings.mult
+    }
+
+    #[inline]
     pub fn sample_3d<K: NoiseKind3d>(&self, x: f32, y: f32, z: f32, seed: i32) -> f32
     where
         T: Noise3d<K>,
     {
         <T as Noise3d<K>>::sample_3d(&self.backend, x, y, z, seed, &self.settings)
+            * self.settings.mult
+    }
+
+    #[inline]
+    pub fn sample_vec3<K: NoiseKind3d>(&self, vec: Vec3, seed: i32) -> f32
+    where
+        T: Noise3d<K>,
+    {
+        <T as Noise3d<K>>::sample_3d(&self.backend, vec.x, vec.y, vec.z, seed, &self.settings)
             * self.settings.mult
     }
 }
