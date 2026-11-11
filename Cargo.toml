@@ -1,5 +1,5 @@
 [package]
-name = "sns_helpers"
+name = "sns_helper"
 version = "0.1.0"
 edition = "2024"
 
