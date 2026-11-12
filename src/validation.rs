@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-pub fn check_f32_values(issues: &mut Vec<String>, values: Vec<f32>, msg: String) {
+pub fn check_f32_values(issues: &mut Vec<String>, values: &Vec<f32>, msg: String) {
     if values.into_iter().any(|value| !value.is_finite()) {
         issues.push(msg);
     }
@@ -8,7 +8,7 @@ pub fn check_f32_values(issues: &mut Vec<String>, values: Vec<f32>, msg: String)
 
 pub fn check_f32_opt(
     issues: &mut Vec<String>,
-    values: Vec<f32>,
+    values: &Vec<f32>,
     opt_cond: Option<bool>,
     msg: String,
 ) {
