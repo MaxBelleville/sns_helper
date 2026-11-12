@@ -15,7 +15,7 @@ pub fn check_values(
             check_pass = false;
         }
     }
-    if check_pass {
+    if !check_pass {
         issues.push(msg);
     }
 }
