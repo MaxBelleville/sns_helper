@@ -1,6 +1,6 @@
 pub fn check_values(
     issues: &mut Vec<String>,
-    values: Vec<f32>,
+    values: impl Iterator<Item = f32>,
     opt_cond: Option<bool>,
     msg: String,
 ) {
