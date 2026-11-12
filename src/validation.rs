@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-pub fn check_f32_values(issues: &mut Vec<String>, values: impl Iterator<Item = f32>, msg: String) {
+pub fn check_f32_values(issues: &mut Vec<String>, values: Vec<f32>, msg: String) {
     let mut check_pass = true;
     for value in values {
         if !value.is_finite() {
@@ -14,7 +14,7 @@ pub fn check_f32_values(issues: &mut Vec<String>, values: impl Iterator<Item = f
 
 pub fn check_f32_opt(
     issues: &mut Vec<String>,
-    values: impl Iterator<Item = f32>,
+    values: Vec<f32>,
     opt_cond: Option<bool>,
     msg: String,
 ) {
@@ -27,7 +27,7 @@ pub fn check_f32_opt(
 
 pub fn check_f32_invalid(
     issues: &mut Vec<String>,
-    values: impl Iterator<Item = f32>,
+    values: Vec<f32>,
     is_invalid: impl Fn(f32) -> bool,
     msg: String,
 ) {
@@ -42,7 +42,7 @@ pub fn check_f32_invalid(
 
 pub fn check_invalid(
     issues: &mut Vec<String>,
-    fields: impl Iterator<Item = (f32, String)>,
+    fields: Vec<(f32, String)>,
     is_invalid: impl Fn(f32) -> bool,
 ) {
     for (value, msg) in fields {
@@ -54,7 +54,7 @@ pub fn check_invalid(
 
 pub fn check_f32(
     issues: &mut Vec<String>,
-    values: impl IntoIterator<Item = f32>,
+    values: Vec<f32>,
     is_invalid: impl Fn(f32) -> bool,
     opt_cond: Option<bool>,
     msg: String,
