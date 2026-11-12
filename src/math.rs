@@ -1,7 +1,3 @@
-#[cfg(feature = "bevy")]
-use bevy_math::*;
-
-#[cfg(not(feature = "bevy"))]
 use super::structs::{IVec2, IVec3, Vec2, Vec3};
 
 #[inline]

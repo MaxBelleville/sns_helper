@@ -1,7 +1,9 @@
+use macros::IterableFields;
+
 use super::structs::{Vec2, Vec3};
 
 /// Parameters shared by noise implementations.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, IterableFields)]
 pub struct NoiseSettings {
     pub frequency: f32,
     pub octaves: u8,
