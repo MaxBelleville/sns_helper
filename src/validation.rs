@@ -1,13 +1,7 @@
 use std::collections::BTreeMap;
 
 pub fn check_f32_values(issues: &mut Vec<String>, values: Vec<f32>, msg: String) {
-    let mut check_pass = true;
-    for value in values {
-        if !value.is_finite() {
-            check_pass = false;
-        }
-    }
-    if !check_pass {
+    if values.into_iter().any(|value| !value.is_finite()) {
         issues.push(msg);
     }
 }
@@ -25,57 +19,38 @@ pub fn check_f32_opt(
     }
 }
 
-pub fn check_f32_invalid(
+pub fn check_vec<T>(
     issues: &mut Vec<String>,
-    values: Vec<f32>,
-    is_invalid: impl Fn(f32) -> bool,
+    values: &Vec<T>,
+    is_invalid: impl Fn(&T) -> bool,
     msg: String,
 ) {
-    let values_invalid = values
-        .into_iter()
-        .any(|value| !value.is_finite() || is_invalid(value));
-
+    let values_invalid = values.iter().any(|value| is_invalid(value));
     if values_invalid {
         issues.push(msg);
     }
 }
 
-pub fn check_invalid(
+pub fn check_vec_opt<T>(
     issues: &mut Vec<String>,
-    fields: Vec<(f32, String)>,
-    is_invalid: impl Fn(f32) -> bool,
-) {
-    for (value, msg) in fields {
-        if !value.is_finite() || is_invalid(value) {
-            issues.push(msg);
-        }
-    }
-}
-
-pub fn check_f32(
-    issues: &mut Vec<String>,
-    values: Vec<f32>,
-    is_invalid: impl Fn(f32) -> bool,
+    values: &Vec<T>,
+    is_invalid: impl Fn(&T) -> bool,
     opt_cond: Option<bool>,
     msg: String,
 ) {
-    let values_invalid = values
-        .into_iter()
-        .any(|value| !value.is_finite() || is_invalid(value));
-
+    let values_invalid = values.iter().any(|value| is_invalid(value));
     if values_invalid || opt_cond == Some(true) {
         issues.push(msg);
     }
 }
 
-pub fn check_vec<T>(
+pub fn check_vec_msg<T>(
     issues: &mut Vec<String>,
-    vals: &Vec<T>,
-    contains_key: impl Fn(usize, &T) -> bool,
-    msg: String,
+    values: &Vec<(String, T)>,
+    is_invalid: impl Fn(&T) -> bool,
 ) {
-    for (idx, val) in vals.iter().enumerate() {
-        if contains_key(idx, val) {
+    for (msg, val) in values {
+        if is_invalid(val) {
             issues.push(msg.clone());
         }
     }
@@ -83,13 +58,12 @@ pub fn check_vec<T>(
 
 pub fn check_btree<K, V>(
     issues: &mut Vec<String>,
-    vals: &BTreeMap<K, V>,
-    contains_key: impl Fn(&K, &V) -> bool,
+    values: &BTreeMap<K, V>,
+    is_invalid: impl Fn(&K, &V) -> bool,
     msg: String,
 ) {
-    for (key, val) in vals {
-        if contains_key(key, val) {
-            issues.push(msg.clone());
-        }
+    let values_invalid = values.iter().any(|(key, val)| is_invalid(key, val));
+    if values_invalid {
+        issues.push(msg);
     }
 }
