@@ -1,4 +1,5 @@
 use bytemuck::NoUninit;
+use serde::Deserialize;
 use std::marker::PhantomData;
 use std::mem::size_of;
 
@@ -6,6 +7,7 @@ use std::mem::size_of;
 pub use bevy_math::prelude::*;
 
 #[cfg(not(feature = "bevy"))]
+#[derive(Debug, Default, Deserialize)]
 pub struct IVec3 {
     pub x: i32,
     pub y: i32,
@@ -18,6 +20,7 @@ impl IVec3 {
     }
 }
 #[cfg(not(feature = "bevy"))]
+#[derive(Debug, Default, Deserialize)]
 pub struct IVec2 {
     pub x: i32,
     pub y: i32,
@@ -29,6 +32,7 @@ impl IVec2 {
     }
 }
 #[cfg(not(feature = "bevy"))]
+#[derive(Debug, Default, Deserialize)]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -41,6 +45,7 @@ impl Vec3 {
     }
 }
 #[cfg(not(feature = "bevy"))]
+#[derive(Debug, Default, Deserialize)]
 pub struct Vec2 {
     pub x: f32,
     pub y: f32,
