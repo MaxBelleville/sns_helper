@@ -62,6 +62,18 @@ mod validation_derive_tests {
         optional: Option<f32>,
     }
 
+    #[derive(FieldValidate)]
+    struct ContainerValues {
+        #[constraint(min = 0.0, max = 10.0, is_finite)]
+        opt_f32_optional: Option<f32>,
+        #[constraint(min = 0.0, max = 10.0, is_some)]
+        opt_f32_required: Option<f32>,
+        #[constraint(min = 1.0, max = 5.0)]
+        vec_i32_optional: Vec<i32>,
+        #[constraint(min = 1.0, max = 5.0, is_some)]
+        vec_i32_required: Vec<i32>,
+    }
+
     #[test]
     fn validates_struct_and_field_constraints_while_skipping_fields() {
         let valid = ColorValues {
@@ -132,5 +144,63 @@ mod validation_derive_tests {
                 .collect::<Vec<_>>(),
             [1.0, 2.0, 3.0]
         );
+    }
+
+    #[test]
+    fn validates_container_fields_and_is_some() {
+        let valid = ContainerValues {
+            opt_f32_optional: None,
+            opt_f32_required: Some(5.0),
+            vec_i32_optional: vec![],
+            vec_i32_required: vec![2, 3],
+        };
+        assert_eq!(valid.validate(), Ok(()));
+
+        let invalid = ContainerValues {
+            opt_f32_optional: Some(15.0),
+            opt_f32_required: None,
+            vec_i32_optional: vec![0, 3],
+            vec_i32_required: vec![],
+        };
+        let errors = invalid.validate().unwrap_err();
+        assert_eq!(errors.len(), 4);
+        assert!(errors[0].contains("opt_f32_optional"));
+        assert!(errors[1].contains("opt_f32_required"));
+        assert!(errors[1].contains("is_some"));
+        assert!(errors[2].contains("vec_i32_optional"));
+        assert!(errors[3].contains("vec_i32_required"));
+        assert!(errors[3].contains("is_some"));
+    }
+
+    #[test]
+    fn clamped_setters_on_containers() {
+        let mut containers = ContainerValues {
+            opt_f32_optional: Some(5.0),
+            opt_f32_required: Some(5.0),
+            vec_i32_optional: vec![2],
+            vec_i32_required: vec![2],
+        };
+
+        // Option setters
+        containers.opt_f32_optional_clamped(None).unwrap();
+        assert_eq!(containers.opt_f32_optional, None);
+        containers.opt_f32_optional_clamped(Some(20.0)).unwrap();
+        assert_eq!(containers.opt_f32_optional, Some(10.0));
+        assert!(containers.opt_f32_optional_clamped(Some(f32::NAN)).is_err());
+
+        assert!(containers.opt_f32_required_clamped(None).is_err());
+        containers.opt_f32_required_clamped(Some(-5.0)).unwrap();
+        assert_eq!(containers.opt_f32_required, Some(0.0));
+
+        // Vec setters
+        containers.vec_i32_optional_clamped(vec![]).unwrap();
+        assert_eq!(containers.vec_i32_optional, Vec::<i32>::new());
+        containers.vec_i32_optional_clamped(vec![-2, 10]).unwrap();
+        assert_eq!(containers.vec_i32_optional, vec![1, 5]);
+
+        assert!(containers.vec_i32_required_clamped(vec![]).is_err());
+        containers.vec_i32_required_clamped(vec![0, 8]).unwrap();
+        assert_eq!(containers.vec_i32_required, vec![1, 5]);
+        assert_eq!(containers.validate(), Ok(()));
     }
 }

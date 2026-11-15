@@ -1,12 +1,16 @@
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{DeriveInput, Expr, Field, Lit, Type, Visibility};
 
+use super::{FieldKind, container_item_type, field_is_skipped};
+
 #[derive(Clone, Copy, Default)]
 struct Constraint {
-    min: Option<f64>,
-    max: Option<f64>,
+    min: Option<f32>,
+    max: Option<f32>,
     is_finite: bool,
+    is_some: bool,
 }
 
 impl Constraint {
@@ -18,10 +22,11 @@ impl Constraint {
             self.max = Some(self.max.map_or(max, |current| current.min(max)));
         }
         self.is_finite |= other.is_finite;
+        self.is_some |= other.is_some;
     }
 
     fn is_empty(self) -> bool {
-        self.min.is_none() && self.max.is_none() && !self.is_finite
+        self.min.is_none() && self.max.is_none() && !self.is_finite && !self.is_some
     }
 }
 
@@ -32,13 +37,17 @@ enum NumericKind {
 }
 
 pub fn make_validate(input: &DeriveInput, fields: &[&Field]) -> syn::Result<TokenStream> {
+    Ok(make_validate_inner(input, fields)?.into())
+}
+
+fn make_validate_inner(input: &DeriveInput, fields: &[&Field]) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let struct_constraint = parse_constraints(&input.attrs)?;
     let mut checks = Vec::new();
     let mut setters = Vec::new();
 
     for field in fields {
-        if is_skipped(field) {
+        if field_is_skipped(field) {
             continue;
         }
 
@@ -47,7 +56,12 @@ pub fn make_validate(input: &DeriveInput, fields: &[&Field]) -> syn::Result<Toke
             continue;
         }
 
-        let Some(kind) = numeric_kind(&field.ty) else {
+        let (field_kind, item_ty) = match container_item_type(&field.ty)? {
+            Some((kind, item_ty)) => (kind, item_ty),
+            None => (FieldKind::Scalar, field.ty.clone()),
+        };
+
+        let Some(kind) = numeric_kind(&item_ty) else {
             if field_constraint.is_empty() {
                 continue;
             }
@@ -64,12 +78,12 @@ pub fn make_validate(input: &DeriveInput, fields: &[&Field]) -> syn::Result<Toke
         constraint.merge(field_constraint);
 
         let min = match kind {
-            NumericKind::F32 => cast_f32_bound(constraint.min, field)?,
-            NumericKind::I32 => cast_i32_min(constraint.min, field)?.map(f64::from),
+            NumericKind::F32 => f32_bound(constraint.min, field)?,
+            NumericKind::I32 => cast_i32_min(constraint.min, field)?.map(|v| v as f32),
         };
         let max = match kind {
-            NumericKind::F32 => cast_f32_bound(constraint.max, field)?,
-            NumericKind::I32 => cast_i32_max(constraint.max, field)?.map(f64::from),
+            NumericKind::F32 => f32_bound(constraint.max, field)?,
+            NumericKind::I32 => cast_i32_max(constraint.max, field)?.map(|v| v as f32),
         };
         if let (Some(min), Some(max)) = (min, max) {
             if min > max {
@@ -80,27 +94,72 @@ pub fn make_validate(input: &DeriveInput, fields: &[&Field]) -> syn::Result<Toke
             }
         }
 
-        let min_check = min.map(|min| match kind {
-            NumericKind::F32 => quote!(!(self.#ident >= (#min as f32))),
-            NumericKind::I32 => quote!(!(self.#ident >= (#min as i32))),
-        });
-        let max_check = max.map(|max| match kind {
-            NumericKind::F32 => quote!(!(self.#ident <= (#max as f32))),
-            NumericKind::I32 => quote!(!(self.#ident <= (#max as i32))),
-        });
         let finite = constraint.is_finite && matches!(kind, NumericKind::F32);
-        let finite_check = if finite {
-            quote!(!self.#ident.is_finite())
+        let is_some = constraint.is_some && !matches!(field_kind, FieldKind::Scalar);
+
+        let elem_min_check = min.map(|min| match kind {
+            NumericKind::F32 => quote!(!(*val >= (#min as f32))),
+            NumericKind::I32 => quote!(!(*val >= (#min as i32))),
+        });
+        let elem_max_check = max.map(|max| match kind {
+            NumericKind::F32 => quote!(!(*val <= (#max as f32))),
+            NumericKind::I32 => quote!(!(*val <= (#max as i32))),
+        });
+        let elem_finite_check = if finite {
+            Some(quote!(!val.is_finite()))
         } else {
-            quote!(false)
+            None
         };
-        let any_checks = min_check
+        let elem_checks: Vec<_> = elem_min_check
             .into_iter()
-            .chain(max_check)
-            .chain(std::iter::once(finite_check));
-        let rules = format_rules(min, max, finite);
+            .chain(elem_max_check)
+            .chain(elem_finite_check)
+            .collect();
+
+        let rules = format_rules(min, max, finite, is_some);
+
+        let violation_check = match field_kind {
+            FieldKind::Scalar => {
+                let min_check = min.map(|min| match kind {
+                    NumericKind::F32 => quote!(!(self.#ident >= (#min as f32))),
+                    NumericKind::I32 => quote!(!(self.#ident >= (#min as i32))),
+                });
+                let max_check = max.map(|max| match kind {
+                    NumericKind::F32 => quote!(!(self.#ident <= (#max as f32))),
+                    NumericKind::I32 => quote!(!(self.#ident <= (#max as i32))),
+                });
+                let finite_check = if finite {
+                    Some(quote!(!self.#ident.is_finite()))
+                } else {
+                    None
+                };
+                let scalar_checks: Vec<_> = min_check
+                    .into_iter()
+                    .chain(max_check)
+                    .chain(finite_check)
+                    .collect();
+                quote!(false #(|| #scalar_checks)*)
+            }
+            FieldKind::Option => {
+                let is_some_check = if is_some {
+                    quote!(self.#ident.is_none())
+                } else {
+                    quote!(false)
+                };
+                quote!(#is_some_check || self.#ident.as_ref().map_or(false, |val| false #(|| #elem_checks)*))
+            }
+            FieldKind::Vec => {
+                let is_some_check = if is_some {
+                    quote!(self.#ident.is_empty())
+                } else {
+                    quote!(false)
+                };
+                quote!(#is_some_check || self.#ident.iter().any(|val| false #(|| #elem_checks)*))
+            }
+        };
+
         checks.push(quote! {
-            if false #(|| #any_checks)* {
+            if #violation_check {
                 issues.push(format!(
                     "field `{}` violates constraints ({})",
                     stringify!(#ident),
@@ -135,17 +194,69 @@ pub fn make_validate(input: &DeriveInput, fields: &[&Field]) -> syn::Result<Toke
                 (quote!(i32), quote! { #min_expr #max_expr })
             }
         };
-        setters.push(quote! {
-            #vis fn #setter(&mut self, mut value: #setter_type) -> Result<(), String> {
-                #setter_logic
-                self.#ident = value;
-                Ok(())
+
+        match field_kind {
+            FieldKind::Scalar => {
+                setters.push(quote! {
+                    #vis fn #setter(&mut self, mut value: #setter_type) -> Result<(), String> {
+                        #setter_logic
+                        self.#ident = value;
+                        Ok(())
+                    }
+                });
             }
-        });
+            FieldKind::Option => {
+                let is_some_check = if is_some {
+                    quote! {
+                        if value.is_none() {
+                            return Err(format!("field `{}` cannot be None", stringify!(#ident)));
+                        }
+                    }
+                } else {
+                    quote! {}
+                };
+                setters.push(quote! {
+                    #vis fn #setter(&mut self, value: Option<#setter_type>) -> Result<(), String> {
+                        #is_some_check
+                        self.#ident = match value {
+                            Some(mut value) => {
+                                #setter_logic
+                                Some(value)
+                            }
+                            None => None,
+                        };
+                        Ok(())
+                    }
+                });
+            }
+            FieldKind::Vec => {
+                let is_some_check = if is_some {
+                    quote! {
+                        if value.is_empty() {
+                            return Err(format!("field `{}` cannot be empty", stringify!(#ident)));
+                        }
+                    }
+                } else {
+                    quote! {}
+                };
+                setters.push(quote! {
+                    #vis fn #setter(&mut self, mut value: Vec<#setter_type>) -> Result<(), String> {
+                        #is_some_check
+                        for elem in &mut value {
+                            let mut value = *elem;
+                            #setter_logic
+                            *elem = value;
+                        }
+                        self.#ident = value;
+                        Ok(())
+                    }
+                });
+            }
+        }
     }
 
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    Ok(TokenStream::from(quote! {
+    Ok(quote! {
         impl #impl_generics #name #ty_generics #where_clause {
             pub fn validate(&self) -> Result<(), Vec<String>> {
                 let mut issues = Vec::<String>::new();
@@ -155,7 +266,7 @@ pub fn make_validate(input: &DeriveInput, fields: &[&Field]) -> syn::Result<Toke
 
             #(#setters)*
         }
-    }))
+    })
 }
 
 fn numeric_kind(ty: &Type) -> Option<NumericKind> {
@@ -166,13 +277,6 @@ fn numeric_kind(ty: &Type) -> Option<NumericKind> {
         "i32" => Some(NumericKind::I32),
         _ => None,
     }
-}
-
-fn is_skipped(field: &Field) -> bool {
-    field
-        .attrs
-        .iter()
-        .any(|attr| attr.path().is_ident("skip_field"))
 }
 
 fn parse_constraints(attrs: &[syn::Attribute]) -> syn::Result<Constraint> {
@@ -191,7 +295,21 @@ fn parse_constraints(attrs: &[syn::Attribute]) -> syn::Result<Constraint> {
         seen_attribute = true;
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("is_finite") {
-                result.is_finite = true;
+                if meta.input.peek(syn::Token![=]) {
+                    let value = meta.value()?.parse::<syn::LitBool>()?;
+                    result.is_finite = value.value();
+                } else {
+                    result.is_finite = true;
+                }
+                return Ok(());
+            }
+            if meta.path.is_ident("is_some") {
+                if meta.input.peek(syn::Token![=]) {
+                    let value = meta.value()?.parse::<syn::LitBool>()?;
+                    result.is_some = value.value();
+                } else {
+                    result.is_some = true;
+                }
                 return Ok(());
             }
             if meta.path.is_ident("min") {
@@ -208,7 +326,7 @@ fn parse_constraints(attrs: &[syn::Attribute]) -> syn::Result<Constraint> {
                 result.max = Some(parse_number(&meta.value()?.parse::<Expr>()?)?);
                 return Ok(());
             }
-            Err(meta.error("supported constraints are `min`, `max`, and `is_finite`"))
+            Err(meta.error("supported constraints are `min`, `max`, `is_finite`, and `is_some`"))
         })?;
     }
     for value in [result.min, result.max].into_iter().flatten() {
@@ -222,7 +340,7 @@ fn parse_constraints(attrs: &[syn::Attribute]) -> syn::Result<Constraint> {
     Ok(result)
 }
 
-fn parse_number(expr: &Expr) -> syn::Result<f64> {
+fn parse_number(expr: &Expr) -> syn::Result<f32> {
     match expr {
         Expr::Lit(expr) => match &expr.lit {
             Lit::Float(value) => value.base10_parse(),
@@ -240,12 +358,11 @@ fn parse_number(expr: &Expr) -> syn::Result<f64> {
     }
 }
 
-fn cast_f32_bound(bound: Option<f64>, field: &Field) -> syn::Result<Option<f64>> {
+fn f32_bound(bound: Option<f32>, field: &Field) -> syn::Result<Option<f32>> {
     bound
         .map(|value| {
-            let value = value as f32;
             if value.is_finite() {
-                Ok(f64::from(value))
+                Ok(value)
             } else {
                 Err(syn::Error::new_spanned(
                     field,
@@ -256,18 +373,18 @@ fn cast_f32_bound(bound: Option<f64>, field: &Field) -> syn::Result<Option<f64>>
         .transpose()
 }
 
-fn cast_i32_min(bound: Option<f64>, field: &Field) -> syn::Result<Option<i32>> {
-    cast_i32_bound(bound.map(f64::ceil), field)
+fn cast_i32_min(bound: Option<f32>, field: &Field) -> syn::Result<Option<i32>> {
+    cast_i32_bound(bound.map(f32::ceil), field)
 }
 
-fn cast_i32_max(bound: Option<f64>, field: &Field) -> syn::Result<Option<i32>> {
-    cast_i32_bound(bound.map(f64::floor), field)
+fn cast_i32_max(bound: Option<f32>, field: &Field) -> syn::Result<Option<i32>> {
+    cast_i32_bound(bound.map(f32::floor), field)
 }
 
-fn cast_i32_bound(bound: Option<f64>, field: &Field) -> syn::Result<Option<i32>> {
+fn cast_i32_bound(bound: Option<f32>, field: &Field) -> syn::Result<Option<i32>> {
     bound
         .map(|value| {
-            if value < i32::MIN as f64 || value > i32::MAX as f64 {
+            if value < i32::MIN as f32 || value > i32::MAX as f32 {
                 Err(syn::Error::new_spanned(
                     field,
                     "constraint bound is outside the i32 range",
@@ -279,7 +396,7 @@ fn cast_i32_bound(bound: Option<f64>, field: &Field) -> syn::Result<Option<i32>>
         .transpose()
 }
 
-fn format_rules(min: Option<f64>, max: Option<f64>, finite: bool) -> String {
+fn format_rules(min: Option<f32>, max: Option<f32>, finite: bool, is_some: bool) -> String {
     let mut rules = Vec::new();
     if let Some(min) = min {
         rules.push(format!("min = {min}"));
@@ -290,12 +407,15 @@ fn format_rules(min: Option<f64>, max: Option<f64>, finite: bool) -> String {
     if finite {
         rules.push("is_finite".to_owned());
     }
+    if is_some {
+        rules.push("is_some".to_owned());
+    }
     rules.join(", ")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::make_validate;
+    use super::make_validate_inner;
     use syn::{Data, DeriveInput, Fields, parse_quote};
 
     fn fields(input: &DeriveInput) -> Vec<&syn::Field> {
@@ -314,7 +434,7 @@ mod tests {
             #[constraint(positive)]
             struct Invalid { value: f32 }
         };
-        assert!(make_validate(&input, &fields(&input)).is_err());
+        assert!(make_validate_inner(&input, &fields(&input)).is_err());
     }
 
     #[test]
@@ -323,7 +443,7 @@ mod tests {
             #[constraint(min = 2.0, max = 1.0)]
             struct Invalid { value: f32 }
         };
-        assert!(make_validate(&input, &fields(&input)).is_err());
+        assert!(make_validate_inner(&input, &fields(&input)).is_err());
     }
 
     #[test]
@@ -331,6 +451,20 @@ mod tests {
         let input: DeriveInput = parse_quote! {
             struct Invalid { #[constraint(min = 0.0)] value: String }
         };
-        assert!(make_validate(&input, &fields(&input)).is_err());
+        assert!(make_validate_inner(&input, &fields(&input)).is_err());
+    }
+
+    #[test]
+    fn supports_is_some_and_containers() {
+        let input: DeriveInput = parse_quote! {
+            #[constraint(is_some)]
+            struct ValidContainers {
+                #[constraint(min = 0.0, max = 10.0, is_finite)]
+                vec_val: Vec<f32>,
+                #[constraint(min = -5.0)]
+                opt_val: Option<i32>,
+            }
+        };
+        assert!(make_validate_inner(&input, &fields(&input)).is_ok());
     }
 }
