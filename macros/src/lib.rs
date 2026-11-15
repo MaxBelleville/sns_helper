@@ -5,6 +5,7 @@ use proc_macro::TokenStream;
 use syn::spanned::Spanned;
 use syn::{DeriveInput, parse_macro_input};
 mod math;
+mod validate;
 
 #[proc_macro_derive(FieldMath, attributes(skip_field))]
 pub fn derive_make_field_math(input: TokenStream) -> TokenStream {
@@ -27,6 +28,19 @@ pub fn derive_make_iterable_field(input: TokenStream) -> TokenStream {
     }
     let fields = fields_result.unwrap();
     match math::make_iterable(&input, &fields) {
+        Ok(expansion) => expansion,
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_derive(FieldValidate, attributes(constraint, skip_field))]
+pub fn derive_validate(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let fields = match extract_named_fields(&input) {
+        Ok(fields) => fields,
+        Err(error) => return error.to_compile_error().into(),
+    };
+    match validate::make_validate(&input, &fields) {
         Ok(expansion) => expansion,
         Err(error) => error.to_compile_error().into(),
     }
