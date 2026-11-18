@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Range as StdRange;
 
-#[derive(Default, Clone, Copy)]
+/// Owns a backend buffer handle. This type intentionally does not implement `Clone` or `Copy`.
 pub struct GpuBuffer<T> {
     /// Backend-specific handle (VkBuffer, CUdeviceptr, wgpu::Buffer, etc.)
     handle: GpuBufferHandle,
@@ -50,6 +50,11 @@ pub enum GpuError {
         start: usize,
         end: usize,
     },
+    OverlappingCopy {
+        src_start: usize,
+        dst_start: usize,
+        len: usize,
+    },
     MissingUsage(&'static str),
     Backend(String),
 }
@@ -69,6 +74,14 @@ impl std::fmt::Display for GpuError {
             Self::InvalidRange { start, end } => {
                 write!(f, "invalid GPU element range {start}..{end}")
             }
+            Self::OverlappingCopy {
+                src_start,
+                dst_start,
+                len,
+            } => write!(
+                f,
+                "same-buffer copy ranges starting at {src_start} and {dst_start} with length {len} overlap",
+            ),
             Self::MissingUsage(usage) => write!(f, "GPU buffer is missing {usage} usage"),
             Self::Backend(message) => write!(f, "GPU backend error: {message}"),
         }
@@ -176,8 +189,8 @@ impl<T> GpuBuffer<T> {
         self.handle
     }
 
-    /// Copies elements from `source` to this buffer. Offsets and lengths are elements.
-    pub fn copy_range_from(
+    /// Copies elements from `source` to this destination buffer. Offsets and lengths are elements.
+    pub fn copy_from(
         &self,
         device: &dyn GpuDevice,
         source: &GpuBuffer<T>,
@@ -199,6 +212,16 @@ impl<T> GpuBuffer<T> {
             .ok_or(GpuError::CapacityOverflow)?;
         let src = GpuRange::new(src_offset..src_end, source.capacity)?;
         let dst = GpuRange::new(dst_offset..dst_end, self.capacity)?;
+        if source.handle.raw() == self.handle.raw()
+            && src.start() < dst.end()
+            && dst.start() < src.end()
+        {
+            return Err(GpuError::OverlappingCopy {
+                src_start: src_offset,
+                dst_start: dst_offset,
+                len,
+            });
+        }
         let element_size = size_of::<T>();
         let src_bytes = src
             .start()
@@ -214,6 +237,17 @@ impl<T> GpuBuffer<T> {
             .ok_or(GpuError::CapacityOverflow)?;
         device.copy_buffer(source.handle, src_bytes, self.handle, dst_bytes, size_bytes)
     }
+    /// Alias for [`GpuBuffer::copy_from`].
+    pub fn copy_range_from(
+        &self,
+        device: &dyn GpuDevice,
+        source: &GpuBuffer<T>,
+        src_offset: usize,
+        dst_offset: usize,
+        len: usize,
+    ) -> Result<Box<dyn GpuCompletion>, GpuError> {
+        self.copy_from(device, source, src_offset, dst_offset, len)
+    }
     pub fn copy_range(
         &self,
         device: &dyn GpuDevice,
@@ -221,7 +255,7 @@ impl<T> GpuBuffer<T> {
         dst_offset: usize,
         len: usize,
     ) -> Result<Box<dyn GpuCompletion>, GpuError> {
-        self.copy_range_from(device, self, src_offset, dst_offset, len)
+        self.copy_from(device, self, src_offset, dst_offset, len)
     }
     /// Uploads elements at `offset`. Buffer offsets and lengths are elements.
     pub fn upload_range(
