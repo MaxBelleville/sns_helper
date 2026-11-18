@@ -1,3 +1,4 @@
+mod gpu;
 mod math;
 mod noise;
 #[cfg(feature = "simdnoise")]
@@ -20,6 +21,7 @@ pub trait IterableField<T> {
 
 pub mod prelude {
     pub use crate::IterableField;
+    pub use crate::gpu::*;
     pub use crate::math::*;
     pub use crate::noise::*;
     #[cfg(feature = "simdnoise")]
