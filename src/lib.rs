@@ -1,11 +1,14 @@
 mod gpu;
 mod math;
 mod noise;
+
 #[cfg(feature = "simdnoise")]
 mod simdnoise;
+
 mod structs;
 mod validation;
 
+extern crate self as sns_helper;
 
 /// Iterates over same-typed fields of a derived struct.
 ///
