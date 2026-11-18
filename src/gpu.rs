@@ -92,7 +92,7 @@ impl std::error::Error for GpuError {}
 /// Completion status for a submitted upload or copy.
 ///
 /// Implementations may report errors that occur after successful submission.
-pub trait GpuCompletion {
+pub trait GpuCompletion: Send {
     fn is_complete(&self) -> Result<bool, GpuError>;
     fn wait(&self) -> Result<(), GpuError>;
 }
