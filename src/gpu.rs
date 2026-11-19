@@ -56,6 +56,7 @@ pub enum GpuError {
         len: usize,
     },
     MissingUsage(&'static str),
+    BlockingWaitUnsupported,
     Backend(String),
 }
 
@@ -83,6 +84,12 @@ impl std::fmt::Display for GpuError {
                 "same-buffer copy ranges starting at {src_start} and {dst_start} with length {len} overlap",
             ),
             Self::MissingUsage(usage) => write!(f, "GPU buffer is missing {usage} usage"),
+            Self::BlockingWaitUnsupported => {
+                write!(
+                    f,
+                    "blocking GPU completion waits are unsupported on this target"
+                )
+            }
             Self::Backend(message) => write!(f, "GPU backend error: {message}"),
         }
     }
