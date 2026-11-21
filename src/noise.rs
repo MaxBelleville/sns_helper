@@ -38,12 +38,31 @@ impl NoiseSettings {
 pub struct SampledNoise2d {
     noise: Vec<f32>,
     width: usize,
+    height: usize,
+    cursor: usize,
 }
 impl SampledNoise2d {
-    pub fn new(noise: Vec<f32>, width: usize) -> Self {
-        Self { noise, width }
+    pub fn new(noise: Vec<f32>, width: usize, height: usize) -> Self {
+        let expected_len = width
+            .checked_mul(height)
+            .expect("sampled noise dimensions overflow usize");
+        assert_eq!(
+            noise.len(),
+            expected_len,
+            "noise length does not match dimensions"
+        );
+        Self {
+            noise,
+            width,
+            height,
+            cursor: 0,
+        }
     }
     pub fn get(&self, x_idx: usize, y_idx: usize) -> f32 {
+        assert!(
+            x_idx < self.width && y_idx < self.height,
+            "noise coordinate out of bounds"
+        );
         self.noise[y_idx * self.width + x_idx]
     }
     pub fn get_vec2(&self, idx: UVec2) -> f32 {
@@ -59,7 +78,11 @@ impl SampledNoise2d {
 impl Iterator for SampledNoise2d {
     type Item = f32;
     fn next(&mut self) -> Option<Self::Item> {
-        self.noise.iter().next().cloned()
+        let value = self.noise.get(self.cursor).copied();
+        if value.is_some() {
+            self.cursor += 1;
+        }
+        value
     }
 }
 
@@ -67,16 +90,33 @@ pub struct SampledNoise3d {
     noise: Vec<f32>,
     width: usize,
     height: usize,
+    depth: usize,
+    cursor: usize,
 }
 impl SampledNoise3d {
-    pub fn new(noise: Vec<f32>, width: usize, height: usize) -> Self {
+    pub fn new(noise: Vec<f32>, width: usize, height: usize, depth: usize) -> Self {
+        let expected_len = width
+            .checked_mul(height)
+            .and_then(|area| area.checked_mul(depth))
+            .expect("sampled noise dimensions overflow usize");
+        assert_eq!(
+            noise.len(),
+            expected_len,
+            "noise length does not match dimensions"
+        );
         Self {
             noise,
             width,
             height,
+            depth,
+            cursor: 0,
         }
     }
     pub fn get(&self, x_idx: usize, y_idx: usize, z_idx: usize) -> f32 {
+        assert!(
+            x_idx < self.width && y_idx < self.height && z_idx < self.depth,
+            "noise coordinate out of bounds"
+        );
         self.noise[z_idx * self.width * self.height + y_idx * self.width + x_idx]
     }
     pub fn get_vec3(&self, idx: UVec3) -> f32 {
@@ -93,7 +133,11 @@ impl SampledNoise3d {
 impl Iterator for SampledNoise3d {
     type Item = f32;
     fn next(&mut self) -> Option<Self::Item> {
-        self.noise.iter().next().cloned()
+        let value = self.noise.get(self.cursor).copied();
+        if value.is_some() {
+            self.cursor += 1;
+        }
+        value
     }
 }
 
@@ -319,7 +363,7 @@ mod noise_tests {
                     self.sample_point_2d(x + ix as f32, y + iy as f32, seed, settings)
                 })
                 .collect();
-            SampledNoise2d::new(normalize(values, settings.range), w)
+            SampledNoise2d::new(normalize(values, settings.range), w, h)
         }
     }
 
@@ -360,7 +404,7 @@ mod noise_tests {
                     )
                 })
                 .collect();
-            SampledNoise3d::new(normalize(values, settings.range), w, h)
+            SampledNoise3d::new(normalize(values, settings.range), w, h, d)
         }
     }
 

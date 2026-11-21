@@ -83,6 +83,7 @@ macro_rules! impl_noise_2d {
                 SampledNoise2d::new(
                     builder.generate_scaled(settings.range.x, settings.range.y),
                     w,
+                    h,
                 )
             }
         }
@@ -122,6 +123,7 @@ macro_rules! impl_noise_3d {
                     builder.generate_scaled(settings.range.x, settings.range.y),
                     w,
                     h,
+                    d,
                 )
             }
         }
