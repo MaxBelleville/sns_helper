@@ -77,10 +77,13 @@ macro_rules! impl_noise_2d {
                 h: usize,
                 seed: i32,
                 settings: &NoiseSettings,
-            ) -> Vec<f32> {
+            ) -> SampledNoise2d {
                 let mut builder = NoiseBuilder::$constructor(x, w, y, h);
                 builder.configure(settings, seed);
-                builder.generate_scaled(settings.range.x, settings.range.y)
+                SampledNoise2d::new(
+                    builder.generate_scaled(settings.range.x, settings.range.y),
+                    w,
+                )
             }
         }
     };
@@ -112,10 +115,14 @@ macro_rules! impl_noise_3d {
                 d: usize,
                 seed: i32,
                 settings: &NoiseSettings,
-            ) -> Vec<f32> {
+            ) -> SampledNoise3d {
                 let mut builder = NoiseBuilder::$constructor(x, w, y, h, z, d);
                 builder.configure(settings, seed);
-                builder.generate_scaled(settings.range.x, settings.range.y)
+                SampledNoise3d::new(
+                    builder.generate_scaled(settings.range.x, settings.range.y),
+                    w,
+                    h,
+                )
             }
         }
     };
@@ -196,12 +203,12 @@ mod tests {
                 .is_finite()
         );
 
-        let field_2d = builder.sample_2d::<Fbm2D>(1.0, 2.0, 4, 3, 42);
-        let field_3d = builder.sample_3d::<Fbm3D>(1.0, 2.0, 3.0, 4, 3, 2, 42);
+        let mut field_2d = builder.sample_2d::<Fbm2D>(1.0, 2.0, 4, 3, 42);
+        let mut field_3d = builder.sample_3d::<Fbm3D>(1.0, 2.0, 3.0, 4, 3, 2, 42);
         assert_eq!(field_2d.len(), 12);
         assert_eq!(field_3d.len(), 24);
-        assert!(field_2d.iter().all(|v| v.is_finite()));
-        assert!(field_3d.iter().all(|v| v.is_finite()));
+        assert!(field_2d.all(|v| v.is_finite()));
+        assert!(field_3d.all(|v| v.is_finite()));
 
         let vec_field_2d = builder.sample_vec2::<Fbm2D>(
             crate::structs::Vec2::new(1.0, 2.0),
@@ -235,7 +242,6 @@ mod tests {
         let scaled_field_2d = scaled.sample_2d::<Fbm2D>(1.0, 2.0, 3, 2, 42);
         assert!(
             field_2d
-                .iter()
                 .zip(scaled_field_2d)
                 .all(|(a, b)| (b - (a * 4.0 - 2.0)).abs() < 1e-5)
         );
@@ -244,7 +250,6 @@ mod tests {
         let scaled_field_3d = scaled.sample_3d::<Fbm3D>(1.0, 2.0, 3.0, 3, 2, 2, 42);
         assert!(
             field_3d
-                .iter()
                 .zip(scaled_field_3d)
                 .all(|(a, b)| (b - (a * 4.0 - 2.0)).abs() < 1e-5)
         );

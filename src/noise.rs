@@ -34,6 +34,68 @@ impl NoiseSettings {
         }
     }
 }
+#[derive(Debug, Default)]
+pub struct SampledNoise2d {
+    noise: Vec<f32>,
+    width: usize,
+}
+impl SampledNoise2d {
+    pub fn new(noise: Vec<f32>, width: usize) -> Self {
+        Self { noise, width }
+    }
+    pub fn get(&self, x_idx: usize, y_idx: usize) -> f32 {
+        self.noise[y_idx * self.width + x_idx]
+    }
+    pub fn get_vec2(&self, idx: UVec2) -> f32 {
+        self.get(idx.x as usize, idx.y as usize)
+    }
+    pub fn get_full_noise(&self) -> &[f32] {
+        &self.noise
+    }
+    pub fn len(&self) -> usize {
+        self.noise.len()
+    }
+}
+impl Iterator for SampledNoise2d {
+    type Item = f32;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.noise.iter().next().cloned()
+    }
+}
+
+pub struct SampledNoise3d {
+    noise: Vec<f32>,
+    width: usize,
+    height: usize,
+}
+impl SampledNoise3d {
+    pub fn new(noise: Vec<f32>, width: usize, height: usize) -> Self {
+        Self {
+            noise,
+            width,
+            height,
+        }
+    }
+    pub fn get(&self, x_idx: usize, y_idx: usize, z_idx: usize) -> f32 {
+        self.noise[z_idx * self.width * self.height + y_idx * self.width + x_idx]
+    }
+    pub fn get_vec3(&self, idx: UVec3) -> f32 {
+        self.get(idx.x as usize, idx.y as usize, idx.z as usize)
+    }
+    pub fn get_full_noise(&self) -> &[f32] {
+        &self.noise
+    }
+    pub fn len(&self) -> usize {
+        self.noise.len()
+    }
+}
+
+impl Iterator for SampledNoise3d {
+    type Item = f32;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.noise.iter().next().cloned()
+    }
+}
 
 /// Marker for noise algorithms that can be sampled in two dimensions.
 pub trait NoiseKind2d {}
@@ -76,7 +138,7 @@ pub trait Noise2d<K: NoiseKind2d> {
         h: usize,
         seed: i32,
         settings: &NoiseSettings,
-    ) -> Vec<f32>;
+    ) -> SampledNoise2d;
 }
 
 /// A backend that can sample three-dimensional noise families.
@@ -92,7 +154,7 @@ pub trait Noise3d<K: NoiseKind3d> {
         d: usize,
         seed: i32,
         settings: &NoiseSettings,
-    ) -> Vec<f32>;
+    ) -> SampledNoise3d;
 }
 
 /// Typed noise sampler. Dimension-specific methods are available only when
@@ -133,7 +195,7 @@ impl<T> NoiseSampler<T> {
         w: usize,
         h: usize,
         seed: i32,
-    ) -> Vec<f32>
+    ) -> SampledNoise2d
     where
         T: Noise2d<K>,
     {
@@ -148,7 +210,7 @@ impl<T> NoiseSampler<T> {
         <T as Noise2d<K>>::sample_point_2d(&self.backend, pos.x, pos.y, seed, &self.settings)
     }
     #[inline]
-    pub fn sample_vec2<K: NoiseKind2d>(&self, pos: Vec2, size: UVec2, seed: i32) -> Vec<f32>
+    pub fn sample_vec2<K: NoiseKind2d>(&self, pos: Vec2, size: UVec2, seed: i32) -> SampledNoise2d
     where
         T: Noise2d<K>,
     {
@@ -180,7 +242,7 @@ impl<T> NoiseSampler<T> {
         h: usize,
         d: usize,
         seed: i32,
-    ) -> Vec<f32>
+    ) -> SampledNoise3d
     where
         T: Noise3d<K>,
     {
@@ -195,7 +257,7 @@ impl<T> NoiseSampler<T> {
         <T as Noise3d<K>>::sample_point_3d(&self.backend, pos.x, pos.y, pos.z, seed, &self.settings)
     }
     #[inline]
-    pub fn sample_vec3<K: NoiseKind3d>(&self, pos: Vec3, size: UVec3, seed: i32) -> Vec<f32>
+    pub fn sample_vec3<K: NoiseKind3d>(&self, pos: Vec3, size: UVec3, seed: i32) -> SampledNoise3d
     where
         T: Noise3d<K>,
     {
@@ -249,7 +311,7 @@ mod noise_tests {
             h: usize,
             seed: i32,
             settings: &NoiseSettings,
-        ) -> Vec<f32> {
+        ) -> SampledNoise2d {
             let values = (0..(w * h))
                 .map(|i| {
                     let ix = i % w;
@@ -257,7 +319,7 @@ mod noise_tests {
                     self.sample_point_2d(x + ix as f32, y + iy as f32, seed, settings)
                 })
                 .collect();
-            normalize(values, settings.range)
+            SampledNoise2d::new(normalize(values, settings.range), w)
         }
     }
 
@@ -283,7 +345,7 @@ mod noise_tests {
             d: usize,
             seed: i32,
             settings: &NoiseSettings,
-        ) -> Vec<f32> {
+        ) -> SampledNoise3d {
             let values = (0..(w * h * d))
                 .map(|i| {
                     let ix = i % w;
@@ -298,7 +360,7 @@ mod noise_tests {
                     )
                 })
                 .collect();
-            normalize(values, settings.range)
+            SampledNoise3d::new(normalize(values, settings.range), w, h)
         }
     }
 
@@ -309,11 +371,11 @@ mod noise_tests {
 
         assert_eq!(builder.sample_point_2d::<Fbm2D>(1.0, 2.0, 5), 10.0);
         assert_eq!(builder.sample_point_3d::<Fbm3D>(1.0, 2.0, 3.0, 5), 13.0);
-        let field_2d = builder.sample_2d::<Fbm2D>(1.0, 2.0, 2, 2, 5);
-        assert_eq!(field_2d.first(), Some(&-1.0));
-        assert_eq!(field_2d.last(), Some(&1.0));
-        let field_3d = builder.sample_3d::<Fbm3D>(1.0, 2.0, 3.0, 2, 1, 1, 5);
-        assert_eq!(field_3d.first(), Some(&-1.0));
-        assert_eq!(field_3d.last(), Some(&1.0));
+        let mut field_2d = builder.sample_2d::<Fbm2D>(1.0, 2.0, 2, 2, 5);
+        assert_eq!(field_2d.nth(0), Some(-1.0));
+        assert_eq!(field_2d.last(), Some(1.0));
+        let mut field_3d = builder.sample_3d::<Fbm3D>(1.0, 2.0, 3.0, 2, 1, 1, 5);
+        assert_eq!(field_3d.nth(0), Some(-1.0));
+        assert_eq!(field_3d.last(), Some(1.0));
     }
 }
