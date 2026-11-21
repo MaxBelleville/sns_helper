@@ -23,6 +23,22 @@ impl IVec3 {
     pub const NEG_Y: Self = Self::new(0, -1, 0);
     pub const NEG_Z: Self = Self::new(0, 0, -1);
 }
+
+#[cfg(not(feature = "bevy"))]
+#[derive(Debug, Default, Deserialize, Clone, Copy)]
+pub struct UVec3 {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+}
+
+#[cfg(not(feature = "bevy"))]
+#[derive(Debug, Default, Deserialize, Clone, Copy)]
+pub struct UVec2 {
+    pub x: u32,
+    pub y: u32,
+}
+
 #[cfg(not(feature = "bevy"))]
 #[derive(Debug, Default, Deserialize, Clone, Copy)]
 pub struct IVec2 {
@@ -49,7 +65,7 @@ impl Vec3 {
     }
 }
 #[cfg(not(feature = "bevy"))]
-#[derive(Debug, Default, Deserialize, Clone, Copy)]
+#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq)]
 pub struct Vec2 {
     pub x: f32,
     pub y: f32,
