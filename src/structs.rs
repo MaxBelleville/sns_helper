@@ -5,7 +5,7 @@ use serde::Deserialize;
 pub use bevy_math::prelude::*;
 
 #[cfg(not(feature = "bevy"))]
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone, Copy)]
 pub struct IVec3 {
     pub x: i32,
     pub y: i32,
@@ -13,12 +13,18 @@ pub struct IVec3 {
 }
 #[cfg(not(feature = "bevy"))]
 impl IVec3 {
-    pub fn new(x: i32, y: i32, z: i32) -> Self {
+    pub const fn new(x: i32, y: i32, z: i32) -> Self {
         Self { x, y, z }
     }
+    pub const X: Self = Self::new(1, 0, 0);
+    pub const Y: Self = Self::new(0, 1, 0);
+    pub const Z: Self = Self::new(0, 0, 1);
+    pub const NEG_X: Self = Self::new(-1, 0, 0);
+    pub const NEG_Y: Self = Self::new(0, -1, 0);
+    pub const NEG_Z: Self = Self::new(0, 0, -1);
 }
 #[cfg(not(feature = "bevy"))]
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone, Copy)]
 pub struct IVec2 {
     pub x: i32,
     pub y: i32,
@@ -30,7 +36,7 @@ impl IVec2 {
     }
 }
 #[cfg(not(feature = "bevy"))]
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone, Copy)]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -43,7 +49,7 @@ impl Vec3 {
     }
 }
 #[cfg(not(feature = "bevy"))]
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone, Copy)]
 pub struct Vec2 {
     pub x: f32,
     pub y: f32,
@@ -53,6 +59,57 @@ impl Vec2 {
     pub fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
+}
+
+/// The six face directions of a cubic voxel, in the fixed ordinal order the compute
+/// shader also enumerates them. `dir` is the neighbor offset and `normal` the outward
+/// normal (both in cell-space); corners are the four CCW-from-outside quad corners
+/// relative to the voxel's minimum corner, triangulated as (0, 1, 2) (0, 2, 3).
+pub const CUBE_FACES: [CubeFace; 6] = [
+    // +x: cross((b - a), (c - a)) = (1, 0, 0)
+    CubeFace {
+        dir: IVec3::X,
+        normal: [1.0, 0.0, 0.0],
+        corners: [[1, 0, 1], [1, 0, 0], [1, 1, 0], [1, 1, 1]],
+    },
+    // -x
+    CubeFace {
+        dir: IVec3::NEG_X,
+        normal: [-1.0, 0.0, 0.0],
+        corners: [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]],
+    },
+    // +y
+    CubeFace {
+        dir: IVec3::Y,
+        normal: [0.0, 1.0, 0.0],
+        corners: [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]],
+    },
+    // -y
+    CubeFace {
+        dir: IVec3::NEG_Y,
+        normal: [0.0, -1.0, 0.0],
+        corners: [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]],
+    },
+    // +z
+    CubeFace {
+        dir: IVec3::Z,
+        normal: [0.0, 0.0, 1.0],
+        corners: [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]],
+    },
+    // -z
+    CubeFace {
+        dir: IVec3::NEG_Z,
+        normal: [0.0, 0.0, -1.0],
+        corners: [[1, 0, 0], [0, 0, 0], [0, 1, 0], [1, 1, 0]],
+    },
+];
+
+/// One exposed-face direction of a cubic voxel.
+#[derive(Clone, Copy, Debug)]
+pub struct CubeFace {
+    pub dir: IVec3,
+    pub normal: [f32; 3],
+    pub corners: [[u32; 3]; 4],
 }
 
 pub struct LinearAllocator<T> {
