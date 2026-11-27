@@ -29,6 +29,10 @@ struct RegisteredBuffer {
 /// Handles returned by this adapter are IDs into a synchronized resource registry and should
 /// only be passed back to the same adapter instance.
 ///
+/// Retired buffers are kept alive until [`GpuDevice::flush_retired_buffers`] is called at a safe
+/// point, such as after a frame boundary, so buffer growth does not destroy GPU allocations that
+/// may still be referenced by in-flight work.
+///
 /// Completion polling is available on native and WebGPU targets. `wait` blocks through Bevy's
 /// device polling on native targets; on WebGPU it returns
 /// [`GpuError::BlockingWaitUnsupported`] until the queue callback has completed, since blocking
@@ -37,6 +41,7 @@ pub struct BevyGpuDevice {
     render_device: RenderDevice,
     render_queue: RenderQueue,
     buffers: Mutex<HashMap<u64, RegisteredBuffer>>,
+    retired_buffers: Mutex<Vec<RegisteredBuffer>>,
 }
 
 impl BevyGpuDevice {
@@ -45,6 +50,7 @@ impl BevyGpuDevice {
             render_device,
             render_queue,
             buffers: Mutex::new(HashMap::new()),
+            retired_buffers: Mutex::new(Vec::new()),
         }
     }
 
@@ -70,6 +76,12 @@ impl BevyGpuDevice {
             render_device: self.render_device.clone(),
             complete,
         })
+    }
+
+    /// Reclaims retired GPU buffers. Call at a safe point after GPU work that may reference
+    /// retired buffers has completed, such as after a frame boundary.
+    pub fn compact(&self) -> Result<(), GpuError> {
+        <Self as GpuDevice>::flush_retired_buffers(self)
     }
 }
 
@@ -292,6 +304,29 @@ impl GpuDevice for BevyGpuDevice {
         }
         drop(buffers);
         Ok(self.completion())
+    }
+
+    fn retire_buffer(&self, handle: GpuBufferHandle) -> Result<(), GpuError> {
+        let registered = self
+            .buffers
+            .lock()
+            .map_err(|_| GpuError::Backend("GPU buffer registry lock poisoned".into()))?
+            .remove(&handle.raw())
+            .ok_or_else(|| GpuError::Backend(format!("unknown GPU buffer handle {}", handle.raw())))?;
+        self.retired_buffers
+            .lock()
+            .map_err(|_| GpuError::Backend("retired GPU buffer registry lock poisoned".into()))?
+            .push(registered);
+        Ok(())
+    }
+
+    fn flush_retired_buffers(&self) -> Result<(), GpuError> {
+        let mut retired = self
+            .retired_buffers
+            .lock()
+            .map_err(|_| GpuError::Backend("retired GPU buffer registry lock poisoned".into()))?;
+        retired.clear();
+        Ok(())
     }
 }
 

@@ -17,7 +17,7 @@ pub struct GpuBuffer<T> {
     _marker: PhantomData<T>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash)]
 pub struct GpuBufferHandle {
     raw: u64, // opaque backend handle
 }
@@ -167,6 +167,19 @@ pub trait GpuDevice {
         dst_offset_bytes: usize,
         size_bytes: usize,
     ) -> Result<Box<dyn GpuCompletion>, GpuError>;
+
+    /// Retires a buffer handle for deferred destruction. Backends may keep the underlying
+    /// allocation alive until [`Self::flush_retired_buffers`] or until GPU work referencing it
+    /// completes. This reduces allocation churn when buffers are grown and replaced during a frame.
+    fn retire_buffer(&self, handle: GpuBufferHandle) -> Result<(), GpuError> {
+        self.destroy_buffer(handle)
+    }
+
+    /// Reclaims buffers previously passed to [`Self::retire_buffer`]. Call at a safe point where
+    /// no submitted GPU work still references the retired buffers, such as after a frame boundary.
+    fn flush_retired_buffers(&self) -> Result<(), GpuError> {
+        Ok(())
+    }
 }
 
 impl<T> GpuBuffer<T> {
@@ -287,6 +300,10 @@ impl<T> GpuBuffer<T> {
         device.upload_buffer(self.handle, byte_offset, bytemuck::cast_slice(data))
     }
     /// Grows storage, returning the copy completion token when existing data was copied.
+    ///
+    /// The allocated capacity is rounded up geometrically to reduce repeated reallocations. The
+    /// previous buffer handle is retired through [`GpuDevice::retire_buffer`]; call
+    /// [`GpuDevice::flush_retired_buffers`] at a safe point after dependent GPU work completes.
     pub fn grow(
         &mut self,
         device: &dyn GpuDevice,
@@ -299,7 +316,8 @@ impl<T> GpuBuffer<T> {
                 end: new_capacity,
             });
         }
-        let new_size = new_capacity
+        let target_capacity = geometric_growth_capacity(self.capacity, new_capacity);
+        let new_size = target_capacity
             .checked_mul(size_of::<T>())
             .ok_or(GpuError::CapacityOverflow)?;
         let new_handle = device.create_buffer(new_size, self.usage)?;
@@ -329,12 +347,195 @@ impl<T> GpuBuffer<T> {
         } else {
             None
         };
-        if let Err(error) = device.destroy_buffer(self.handle) {
+        if let Err(error) = device.retire_buffer(self.handle) {
             let _ = device.destroy_buffer(new_handle);
             return Err(error);
         }
         self.handle = new_handle;
-        self.capacity = new_capacity;
+        self.capacity = target_capacity;
         Ok(completion)
+    }
+
+    /// Ensures the buffer can hold at least `min_capacity` elements, growing geometrically when
+    /// needed. This reduces allocation churn compared to growing to the exact required size.
+    ///
+    /// Returns the copy completion token when existing data was copied into a newly allocated
+    /// buffer. The previous buffer handle is retired through [`GpuDevice::retire_buffer`]; call
+    /// [`GpuDevice::flush_retired_buffers`] at a safe point after dependent GPU work completes.
+    pub fn ensure_capacity(
+        &mut self,
+        device: &dyn GpuDevice,
+        min_capacity: usize,
+        copy_existing: bool,
+    ) -> Result<Option<Box<dyn GpuCompletion>>, GpuError> {
+        if min_capacity <= self.capacity {
+            return Ok(None);
+        }
+        self.grow(device, min_capacity, copy_existing)
+    }
+}
+
+fn geometric_growth_capacity(current: usize, min_capacity: usize) -> usize {
+    let doubled = current.saturating_mul(2).max(1);
+    doubled.max(min_capacity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    struct Immediate;
+
+    impl GpuCompletion for Immediate {
+        fn is_complete(&self) -> Result<bool, GpuError> {
+            Ok(true)
+        }
+
+        fn wait(&self) -> Result<(), GpuError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct MockState {
+        next: u64,
+        buffers: HashMap<u64, usize>,
+        retired: Vec<u64>,
+        destroyed: Vec<u64>,
+        copies: Vec<(u64, usize, u64, usize, usize)>,
+    }
+
+    #[derive(Clone, Default)]
+    struct MockDevice {
+        state: Arc<Mutex<MockState>>,
+    }
+
+    impl MockDevice {
+        fn retired(&self) -> Vec<u64> {
+            self.state.lock().unwrap().retired.clone()
+        }
+
+        fn destroyed(&self) -> Vec<u64> {
+            self.state.lock().unwrap().destroyed.clone()
+        }
+    }
+
+    impl GpuDevice for MockDevice {
+        fn create_buffer(
+            &self,
+            size_bytes: usize,
+            _usage: GpuBufferUsage,
+        ) -> Result<GpuBufferHandle, GpuError> {
+            let mut state = self.state.lock().unwrap();
+            state.next += 1;
+            let id = state.next;
+            state.buffers.insert(id, size_bytes);
+            Ok(GpuBufferHandle::new(id))
+        }
+
+        fn destroy_buffer(&self, handle: GpuBufferHandle) -> Result<(), GpuError> {
+            let mut state = self.state.lock().unwrap();
+            state
+                .buffers
+                .remove(&handle.raw())
+                .ok_or_else(|| GpuError::Backend("unknown".into()))?;
+            state.destroyed.push(handle.raw());
+            Ok(())
+        }
+
+        fn upload_buffer(
+            &self,
+            _handle: GpuBufferHandle,
+            _offset_bytes: usize,
+            _data: &[u8],
+        ) -> Result<Box<dyn GpuCompletion>, GpuError> {
+            Ok(Box::new(Immediate))
+        }
+
+        fn copy_buffer(
+            &self,
+            src: GpuBufferHandle,
+            src_offset_bytes: usize,
+            dst: GpuBufferHandle,
+            dst_offset_bytes: usize,
+            size_bytes: usize,
+        ) -> Result<Box<dyn GpuCompletion>, GpuError> {
+            let mut state = self.state.lock().unwrap();
+            state.copies.push((
+                src.raw(),
+                src_offset_bytes,
+                dst.raw(),
+                dst_offset_bytes,
+                size_bytes,
+            ));
+            Ok(Box::new(Immediate))
+        }
+
+        fn retire_buffer(&self, handle: GpuBufferHandle) -> Result<(), GpuError> {
+            let mut state = self.state.lock().unwrap();
+            state
+                .buffers
+                .remove(&handle.raw())
+                .ok_or_else(|| GpuError::Backend("unknown".into()))?;
+            state.retired.push(handle.raw());
+            Ok(())
+        }
+
+        fn flush_retired_buffers(&self) -> Result<(), GpuError> {
+            let mut state = self.state.lock().unwrap();
+            let drained: Vec<_> = state.retired.drain(..).collect();
+            state.destroyed.extend(drained);
+            Ok(())
+        }
+    }
+
+    fn test_usage() -> GpuBufferUsage {
+        GpuBufferUsage {
+            storage: true,
+            transfer_src: true,
+            transfer_dst: true,
+        }
+    }
+
+    #[test]
+    fn grow_uses_geometric_capacity_and_retires_old_buffer() {
+        let device = MockDevice::default();
+        let mut buffer = GpuBuffer::<u32>::new(&device, 4, test_usage()).unwrap();
+        let old = buffer.handle();
+
+        buffer.grow(&device, 5, true).unwrap();
+
+        assert_eq!(buffer.capacity(), 8);
+        assert_ne!(buffer.handle(), old);
+        assert_eq!(device.retired(), vec![old.raw()]);
+        assert!(device.destroyed().is_empty());
+        device.flush_retired_buffers().unwrap();
+        assert_eq!(device.destroyed(), vec![old.raw()]);
+    }
+
+    #[test]
+    fn ensure_capacity_grows_geometrically_and_noops_when_sufficient() {
+        let device = MockDevice::default();
+        let mut buffer = GpuBuffer::<u32>::new(&device, 4, test_usage()).unwrap();
+
+        let none = buffer.ensure_capacity(&device, 4, true).unwrap();
+        assert!(none.is_none());
+        assert_eq!(buffer.capacity(), 4);
+
+        buffer.ensure_capacity(&device, 5, true).unwrap();
+        assert_eq!(buffer.capacity(), 8);
+
+        let none = buffer.ensure_capacity(&device, 8, true).unwrap();
+        assert!(none.is_none());
+        assert_eq!(buffer.capacity(), 8);
+    }
+
+    #[test]
+    fn geometric_growth_caps_to_at_least_requested() {
+        assert_eq!(geometric_growth_capacity(0, 3), 3);
+        assert_eq!(geometric_growth_capacity(4, 5), 8);
+        assert_eq!(geometric_growth_capacity(8, 32), 32);
     }
 }
