@@ -26,7 +26,7 @@ pub trait IterableField<T> {
 pub mod prelude {
     pub use crate::IterableField;
     #[cfg(feature = "bevy_gpu")]
-    pub use crate::bevy_gpu::BevyGpuDevice;
+    pub use crate::bevy_gpu::{BevyGpuDevice, GpuPoolLimits};
     pub use crate::gpu::*;
     pub use crate::math::*;
     pub use crate::noise::*;

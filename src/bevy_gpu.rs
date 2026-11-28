@@ -17,6 +17,29 @@ struct RegisteredBuffer {
     usage: BufferUsages,
 }
 
+/// Bounds on how much VRAM the adapter may hold in retired/recycled buffers.
+///
+/// The defaults are deliberately conservative: a growth ladder (e.g. `2M → 4M → … → 270M`
+/// elements) produces ever-larger buffers that will never be reallocated at the same size, so
+/// retaining them provides no reuse benefit and can exhaust VRAM. By default buffers larger than
+/// `max_single_buffer_bytes` are never pooled at all.
+#[derive(Clone, Copy, Debug)]
+pub struct GpuPoolLimits {
+    pub max_buffers: usize,
+    pub max_bytes: usize,
+    pub max_single_buffer_bytes: usize,
+}
+
+impl Default for GpuPoolLimits {
+    fn default() -> Self {
+        Self {
+            max_buffers: 4,
+            max_bytes: 128 * 1024 * 1024,
+            max_single_buffer_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
 /// A [`GpuDevice`] implementation backed by Bevy's render device and queue.
 ///
 /// Construct this in the render world with its `RenderDevice` and `RenderQueue` resources:
@@ -30,9 +53,10 @@ struct RegisteredBuffer {
 /// only be passed back to the same adapter instance.
 ///
 /// Retired buffers are kept alive until [`GpuDevice::flush_retired_buffers`] is called at a safe
-/// point, such as after a frame boundary. At that point they are moved into a reusable pool so
-/// subsequent growth can recycle an existing allocation instead of asking the GPU for new VRAM.
-/// Buffer growth does not destroy GPU allocations that may still be referenced by in-flight work.
+/// point, such as after a frame boundary. At that point eligible buffers are moved into a bounded
+/// reusable pool so subsequent allocations can recycle VRAM instead of requesting more. Pool size
+/// is limited by [`GpuPoolLimits`]; large buffers from a growth ladder are not retained. Buffer
+/// growth does not destroy GPU allocations that may still be referenced by in-flight work.
 ///
 /// Completion polling is available on native and WebGPU targets. `wait` blocks through Bevy's
 /// device polling on native targets; on WebGPU it returns
@@ -44,17 +68,35 @@ pub struct BevyGpuDevice {
     buffers: Mutex<HashMap<u64, RegisteredBuffer>>,
     retired_buffers: Mutex<Vec<RegisteredBuffer>>,
     recycled_buffers: Mutex<Vec<RegisteredBuffer>>,
+    pool_limits: Mutex<GpuPoolLimits>,
 }
 
 impl BevyGpuDevice {
     pub fn new(render_device: RenderDevice, render_queue: RenderQueue) -> Self {
+        Self::with_pool_limits(render_device, render_queue, GpuPoolLimits::default())
+    }
+
+    /// Constructs the adapter with custom bounds on retained/recycled buffers.
+    pub fn with_pool_limits(
+        render_device: RenderDevice,
+        render_queue: RenderQueue,
+        pool_limits: GpuPoolLimits,
+    ) -> Self {
         Self {
             render_device,
             render_queue,
             buffers: Mutex::new(HashMap::new()),
             retired_buffers: Mutex::new(Vec::new()),
             recycled_buffers: Mutex::new(Vec::new()),
+            pool_limits: Mutex::new(pool_limits),
         }
+    }
+
+    /// Updates the pool limits. Excess pooled buffers are dropped immediately.
+    pub fn set_pool_limits(&self, limits: GpuPoolLimits) {
+        *self.pool_limits.lock().unwrap() = limits;
+        let mut pool = self.recycled_buffers.lock().unwrap();
+        trim_pool(&mut pool, limits, |entry: &RegisteredBuffer| entry.size_bytes);
     }
 
     /// Clones a Bevy buffer resource for use in render bindings or command encoders.
@@ -168,9 +210,13 @@ impl GpuDevice for BevyGpuDevice {
                 .recycled_buffers
                 .lock()
                 .map_err(|_| GpuError::Backend("recycled GPU buffer pool lock poisoned".into()))?;
-            pool.iter()
-                .position(|entry| entry.size_bytes >= size_bytes && entry.usage == bevy_usage)
-                .map(|index| pool.remove(index))
+            let index = pool
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.size_bytes >= size_bytes && entry.usage == bevy_usage)
+                .min_by_key(|(_, entry)| entry.size_bytes)
+                .map(|(index, _)| index);
+            index.map(|index| pool.remove(index))
         };
         let registered = match recycled {
             Some(entry) => entry,
@@ -336,24 +382,40 @@ impl GpuDevice for BevyGpuDevice {
             .map_err(|_| GpuError::Backend("GPU buffer registry lock poisoned".into()))?
             .remove(&handle.raw())
             .ok_or_else(|| GpuError::Backend(format!("unknown GPU buffer handle {}", handle.raw())))?;
-        self.retired_buffers
+        let limits = *self
+            .pool_limits
             .lock()
-            .map_err(|_| GpuError::Backend("retired GPU buffer registry lock poisoned".into()))?
-            .push(registered);
+            .map_err(|_| GpuError::Backend("pool limits lock poisoned".into()))?;
+        {
+            let mut retired = self
+                .retired_buffers
+                .lock()
+                .map_err(|_| GpuError::Backend("retired GPU buffer registry lock poisoned".into()))?;
+            retired.push(registered);
+            trim_pool(&mut retired, limits, |entry: &RegisteredBuffer| entry.size_bytes);
+        }
         Ok(())
     }
 
     fn flush_retired_buffers(&self) -> Result<(), GpuError> {
+        let limits = *self
+            .pool_limits
+            .lock()
+            .map_err(|_| GpuError::Backend("pool limits lock poisoned".into()))?;
         let drained: Vec<_> = self
             .retired_buffers
             .lock()
             .map_err(|_| GpuError::Backend("retired GPU buffer registry lock poisoned".into()))?
             .drain(..)
             .collect();
-        self.recycled_buffers
-            .lock()
-            .map_err(|_| GpuError::Backend("recycled GPU buffer pool lock poisoned".into()))?
-            .extend(drained);
+        {
+            let mut pool = self
+                .recycled_buffers
+                .lock()
+                .map_err(|_| GpuError::Backend("recycled GPU buffer pool lock poisoned".into()))?;
+            pool.extend(drained);
+            trim_pool(&mut pool, limits, |entry: &RegisteredBuffer| entry.size_bytes);
+        }
         Ok(())
     }
 }
@@ -420,6 +482,21 @@ fn validate_byte_range(start: usize, end: usize, capacity: usize) -> Result<(), 
     Ok(())
 }
 
+/// Drops buffers that are too large to pool, then trims oldest-first until the pool fits the
+/// configured count and byte budgets.
+fn trim_pool<T>(pool: &mut Vec<T>, limits: GpuPoolLimits, size_of: impl Fn(&T) -> usize) {
+    pool.retain(|entry| size_of(entry) <= limits.max_single_buffer_bytes);
+    let mut total: usize = pool.iter().fold(0, |sum, entry| {
+        sum.saturating_add(size_of(entry))
+    });
+    while !pool.is_empty()
+        && (pool.len() > limits.max_buffers || total > limits.max_bytes)
+    {
+        let removed = pool.remove(0);
+        total = total.saturating_sub(size_of(&removed));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +531,29 @@ mod tests {
             Err(GpuError::RangeOutOfBounds { .. })
         ));
         assert!(matches!(8usize.checked_add(usize::MAX), None));
+    }
+
+    #[test]
+    fn pool_drops_large_buffers_and_trims_oldest() {
+        let limits = GpuPoolLimits {
+            max_buffers: 2,
+            max_bytes: 100,
+            max_single_buffer_bytes: 60,
+        };
+        let mut pool = vec![10usize, 20, 70, 30];
+        trim_pool(&mut pool, limits, |size| *size);
+        assert_eq!(pool, vec![20, 30]);
+    }
+
+    #[test]
+    fn pool_trims_to_byte_budget() {
+        let limits = GpuPoolLimits {
+            max_buffers: 10,
+            max_bytes: 50,
+            max_single_buffer_bytes: 100,
+        };
+        let mut pool = vec![40usize, 20, 10];
+        trim_pool(&mut pool, limits, |size| *size);
+        assert_eq!(pool, vec![20, 10]);
     }
 }
