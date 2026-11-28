@@ -175,8 +175,9 @@ pub trait GpuDevice {
         self.destroy_buffer(handle)
     }
 
-    /// Reclaims buffers previously passed to [`Self::retire_buffer`]. Call at a safe point where
-    /// no submitted GPU work still references the retired buffers, such as after a frame boundary.
+    /// Reclaims or pools buffers previously passed to [`Self::retire_buffer`]. Call at a safe point
+    /// where no submitted GPU work still references the retired buffers, such as after a frame
+    /// boundary. Implementations may keep the allocations for reuse by later `create_buffer` calls.
     fn flush_retired_buffers(&self) -> Result<(), GpuError> {
         Ok(())
     }
@@ -301,9 +302,10 @@ impl<T> GpuBuffer<T> {
     }
     /// Grows storage, returning the copy completion token when existing data was copied.
     ///
-    /// The allocated capacity is rounded up geometrically to reduce repeated reallocations. The
-    /// previous buffer handle is retired through [`GpuDevice::retire_buffer`]; call
+    /// The previous buffer handle is retired through [`GpuDevice::retire_buffer`]; call
     /// [`GpuDevice::flush_retired_buffers`] at a safe point after dependent GPU work completes.
+    /// The allocation is sized exactly to `new_capacity`; use [`GpuBuffer::ensure_capacity`] when
+    /// geometric headroom is preferred to reduce reallocation frequency.
     pub fn grow(
         &mut self,
         device: &dyn GpuDevice,
@@ -316,8 +318,7 @@ impl<T> GpuBuffer<T> {
                 end: new_capacity,
             });
         }
-        let target_capacity = geometric_growth_capacity(self.capacity, new_capacity);
-        let new_size = target_capacity
+        let new_size = new_capacity
             .checked_mul(size_of::<T>())
             .ok_or(GpuError::CapacityOverflow)?;
         let new_handle = device.create_buffer(new_size, self.usage)?;
@@ -352,12 +353,13 @@ impl<T> GpuBuffer<T> {
             return Err(error);
         }
         self.handle = new_handle;
-        self.capacity = target_capacity;
+        self.capacity = new_capacity;
         Ok(completion)
     }
 
     /// Ensures the buffer can hold at least `min_capacity` elements, growing geometrically when
-    /// needed. This reduces allocation churn compared to growing to the exact required size.
+    /// needed. This reduces allocation churn compared to growing to the exact required size, and
+    /// is the recommended way to size buffers that may grow repeatedly during a frame.
     ///
     /// Returns the copy completion token when existing data was copied into a newly allocated
     /// buffer. The previous buffer handle is retired through [`GpuDevice::retire_buffer`]; call
@@ -371,7 +373,28 @@ impl<T> GpuBuffer<T> {
         if min_capacity <= self.capacity {
             return Ok(None);
         }
-        self.grow(device, min_capacity, copy_existing)
+        let grown = geometric_growth_capacity(self.capacity, min_capacity);
+        self.grow(device, grown, copy_existing)
+    }
+
+    /// Like [`GpuBuffer::ensure_capacity`], but rejects growth beyond `max_capacity`. This gives
+    /// callers a hard VRAM budget for a single buffer, which is useful when a workload (such as
+    /// blocky voxel meshing) can otherwise request very large slabs.
+    pub fn ensure_capacity_within(
+        &mut self,
+        device: &dyn GpuDevice,
+        min_capacity: usize,
+        max_capacity: usize,
+        copy_existing: bool,
+    ) -> Result<Option<Box<dyn GpuCompletion>>, GpuError> {
+        if min_capacity <= self.capacity {
+            return Ok(None);
+        }
+        if min_capacity > max_capacity || max_capacity <= self.capacity {
+            return Err(GpuError::CapacityOverflow);
+        }
+        let grown = geometric_growth_capacity(self.capacity, min_capacity).min(max_capacity);
+        self.grow(device, grown, copy_existing)
     }
 }
 
@@ -500,14 +523,14 @@ mod tests {
     }
 
     #[test]
-    fn grow_uses_geometric_capacity_and_retires_old_buffer() {
+    fn grow_uses_requested_capacity_and_retires_old_buffer() {
         let device = MockDevice::default();
         let mut buffer = GpuBuffer::<u32>::new(&device, 4, test_usage()).unwrap();
         let old = buffer.handle();
 
         buffer.grow(&device, 5, true).unwrap();
 
-        assert_eq!(buffer.capacity(), 8);
+        assert_eq!(buffer.capacity(), 5);
         assert_ne!(buffer.handle(), old);
         assert_eq!(device.retired(), vec![old.raw()]);
         assert!(device.destroyed().is_empty());
@@ -537,5 +560,21 @@ mod tests {
         assert_eq!(geometric_growth_capacity(0, 3), 3);
         assert_eq!(geometric_growth_capacity(4, 5), 8);
         assert_eq!(geometric_growth_capacity(8, 32), 32);
+    }
+
+    #[test]
+    fn ensure_capacity_within_respects_budget() {
+        let device = MockDevice::default();
+        let mut buffer = GpuBuffer::<u32>::new(&device, 4, test_usage()).unwrap();
+
+        buffer
+            .ensure_capacity_within(&device, 5, 6, true)
+            .unwrap();
+        assert_eq!(buffer.capacity(), 6);
+
+        assert!(buffer
+            .ensure_capacity_within(&device, 7, 6, true)
+            .is_err());
+        assert_eq!(buffer.capacity(), 6);
     }
 }

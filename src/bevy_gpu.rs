@@ -30,8 +30,9 @@ struct RegisteredBuffer {
 /// only be passed back to the same adapter instance.
 ///
 /// Retired buffers are kept alive until [`GpuDevice::flush_retired_buffers`] is called at a safe
-/// point, such as after a frame boundary, so buffer growth does not destroy GPU allocations that
-/// may still be referenced by in-flight work.
+/// point, such as after a frame boundary. At that point they are moved into a reusable pool so
+/// subsequent growth can recycle an existing allocation instead of asking the GPU for new VRAM.
+/// Buffer growth does not destroy GPU allocations that may still be referenced by in-flight work.
 ///
 /// Completion polling is available on native and WebGPU targets. `wait` blocks through Bevy's
 /// device polling on native targets; on WebGPU it returns
@@ -42,6 +43,7 @@ pub struct BevyGpuDevice {
     render_queue: RenderQueue,
     buffers: Mutex<HashMap<u64, RegisteredBuffer>>,
     retired_buffers: Mutex<Vec<RegisteredBuffer>>,
+    recycled_buffers: Mutex<Vec<RegisteredBuffer>>,
 }
 
 impl BevyGpuDevice {
@@ -51,6 +53,7 @@ impl BevyGpuDevice {
             render_queue,
             buffers: Mutex::new(HashMap::new()),
             retired_buffers: Mutex::new(Vec::new()),
+            recycled_buffers: Mutex::new(Vec::new()),
         }
     }
 
@@ -78,10 +81,21 @@ impl BevyGpuDevice {
         })
     }
 
-    /// Reclaims retired GPU buffers. Call at a safe point after GPU work that may reference
-    /// retired buffers has completed, such as after a frame boundary.
+    /// Moves retired GPU buffers into the reusable pool. Call at a safe point after GPU work that
+    /// may reference retired buffers has completed, such as after a frame boundary. Subsequent
+    /// buffer creations can then recycle these allocations instead of requesting new VRAM.
     pub fn compact(&self) -> Result<(), GpuError> {
         <Self as GpuDevice>::flush_retired_buffers(self)
+    }
+
+    /// Drops all pooled buffers, truly releasing their GPU memory. Use when VRAM must be
+    /// reclaimed and buffer reuse is not desired.
+    pub fn trim_recycled_buffers(&self) -> Result<(), GpuError> {
+        self.recycled_buffers
+            .lock()
+            .map_err(|_| GpuError::Backend("recycled GPU buffer pool lock poisoned".into()))?
+            .clear();
+        Ok(())
     }
 }
 
@@ -148,25 +162,34 @@ impl GpuDevice for BevyGpuDevice {
             )));
         }
 
-        let buffer = self.render_device.create_buffer(&BufferDescriptor {
-            label: Some("sns_helper GPU buffer"),
-            size,
-            usage: bevy_usage,
-            mapped_at_creation: false,
-        });
         let id = allocate_handle_id()?;
+        let recycled = {
+            let mut pool = self
+                .recycled_buffers
+                .lock()
+                .map_err(|_| GpuError::Backend("recycled GPU buffer pool lock poisoned".into()))?;
+            pool.iter()
+                .position(|entry| entry.size_bytes >= size_bytes && entry.usage == bevy_usage)
+                .map(|index| pool.remove(index))
+        };
+        let registered = match recycled {
+            Some(entry) => entry,
+            None => RegisteredBuffer {
+                buffer: self.render_device.create_buffer(&BufferDescriptor {
+                    label: Some("sns_helper GPU buffer"),
+                    size,
+                    usage: bevy_usage,
+                    mapped_at_creation: false,
+                }),
+                size_bytes,
+                usage: bevy_usage,
+            },
+        };
         let mut buffers = self
             .buffers
             .lock()
             .map_err(|_| GpuError::Backend("GPU buffer registry lock poisoned".into()))?;
-        buffers.insert(
-            id,
-            RegisteredBuffer {
-                buffer,
-                size_bytes,
-                usage: bevy_usage,
-            },
-        );
+        buffers.insert(id, registered);
         Ok(GpuBufferHandle::new(id))
     }
 
@@ -321,11 +344,16 @@ impl GpuDevice for BevyGpuDevice {
     }
 
     fn flush_retired_buffers(&self) -> Result<(), GpuError> {
-        let mut retired = self
+        let drained: Vec<_> = self
             .retired_buffers
             .lock()
-            .map_err(|_| GpuError::Backend("retired GPU buffer registry lock poisoned".into()))?;
-        retired.clear();
+            .map_err(|_| GpuError::Backend("retired GPU buffer registry lock poisoned".into()))?
+            .drain(..)
+            .collect();
+        self.recycled_buffers
+            .lock()
+            .map_err(|_| GpuError::Backend("recycled GPU buffer pool lock poisoned".into()))?
+            .extend(drained);
         Ok(())
     }
 }
